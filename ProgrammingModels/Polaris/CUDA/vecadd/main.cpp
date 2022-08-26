@@ -3,6 +3,8 @@
 #include <math.h>
 #include <iostream>
 #include <cassert>
+#include <hdf5.h>
+#include <cstring>
 
 #define _N 1024
 #define _LOCAL_SIZE 64
@@ -152,5 +154,107 @@ int main( int argc, char* argv[] )
   
   free(a);
   free(b);
+
+  // IO with HDF5
+
+  int mpi_size, mpi_rank;
+  MPI_Comm comm  = MPI_COMM_WORLD;
+  MPI_Info info  = MPI_INFO_NULL;
+  hid_t       file_id, dset_id;         /* file and dataset identifiers */
+  hid_t       filespace, memspace;      /* file and memory dataspace identifiers */
+  hsize_t     dimsf[1];                 /* dataset dimensions */
+  hsize_t     count[1];	          /* hyperslab selection parameters */
+  hsize_t     offset[1];
+  hid_t	      plist_id;                 /* property list identifier */
+  int         i;
+  //
+  // Initialize MPI
+  //
+  MPI_Init(&argc, &argv);
+  MPI_Comm_size(comm, &mpi_size);
+  MPI_Comm_rank(comm, &mpi_rank);
+
+  dimsf[0] = N;
+
+  if(mpi_rank == 0) {
+    //
+    // Set up file access property list with parallel I/O access
+    //
+
+    plist_id = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_libver_bounds(plist_id, H5F_LIBVER_LATEST, H5F_LIBVER_LATEST);
+    hid_t dcpl_id = H5Pcreate(H5P_DATASET_CREATE);
+    H5Pset_alloc_time(dcpl_id, H5D_ALLOC_TIME_EARLY);
+    H5Pset_fill_time(dcpl_id, H5D_FILL_TIME_NEVER);
+
+    //
+    // Create a new file collectively and release property list identifier.
+    //
+
+    file_id = H5Fcreate("vadd.h5", H5F_ACC_TRUNC, H5P_DEFAULT, plist_id);
+    H5Pclose(plist_id);
+        
+    //
+    // Create the dataspace for the dataset.
+    //
+    filespace = H5Screate_simple(1, dimsf, NULL);
+        
+    dset_id = H5Dcreate(file_id, "DSET", H5T_NATIVE_FLOAT, filespace, H5P_DEFAULT, dcpl_id, H5P_DEFAULT);
+    H5Dclose(dset_id);
+
+    H5Sclose(filespace);
+    H5Fclose(file_id);
+    H5Pclose(dcpl_id);
+  }
+
+  plist_id = H5Pcreate(H5P_FILE_ACCESS);
+
+  H5Pset_coll_metadata_write(plist_id, 1);
+  H5Pset_all_coll_metadata_ops(plist_id, 1 );
+  H5Pset_libver_bounds(plist_id, H5F_LIBVER_LATEST, H5F_LIBVER_LATEST);
+
+  H5Pset_fapl_mpio(plist_id, comm, info);
+      
+  //
+  // Create a new file collectively and release property list identifier.
+  //
+  file_id = H5Fopen("vadd.h5", H5F_ACC_RDWR, plist_id);
+  H5Pclose(plist_id);
+      
+  //
+  // Create the dataspace for the dataset.
+  //
+  filespace = H5Screate_simple(1, dimsf, NULL);
+
+  //
+  // Each process defines dataset in memory and writes it to the hyperslab
+  // in the file.
+  //
+  count[0] =  dimsf[0]/mpi_size; 
+  offset[0] = (mpi_rank)*count[0];
+  memspace = H5Screate_simple(1, count, NULL);
+
+  //
+  // Select hyperslab in the file.
+  //
+
+  H5Sselect_hyperslab(filespace, H5S_SELECT_SET, offset, NULL, count, NULL);
+      
+  plist_id = H5Pcreate(H5P_DATASET_XFER);
+
+  //  H5Pset_dxpl_mpio(plist_id, H5FD_MPIO_COLLECTIVE);
+
+  dset_id = H5Dopen(file_id, "DSET", H5P_DEFAULT);
+  H5Dwrite(dset_id, H5T_NATIVE_FLOAT, memspace, filespace, plist_id, c);
+  H5Dclose(dset_id);
+
+  //
+  // Close/release resources.
+  //
+  H5Pclose(plist_id);
+  H5Sclose(memspace);
+  H5Sclose(filespace);
+  H5Fclose(file_id);
+
   free(c);
 }
